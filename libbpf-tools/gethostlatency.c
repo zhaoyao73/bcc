@@ -1,8 +1,13 @@
-// SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
-// Copyright (c) 2021 Hengqi Chen
-//
-// Based on gethostlatency(8) from BCC by Brendan Gregg.
-// 24-Mar-2021   Hengqi Chen   Created this.
+/* SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause) */
+
+/*
+ * gethostlatency  Show latency for getaddrinfo/gethostbyname[2] calls.
+ *
+ * Copyright (c) 2021 Hengqi Chen
+ *
+ * Based on gethostlatency(8) from BCC by Brendan Gregg.
+ * 24-Mar-2021   Hengqi Chen   Created this.
+ */
 #include <argp.h>
 #include <errno.h>
 #include <signal.h>
@@ -15,12 +20,14 @@
 #include "trace_helpers.h"
 #include "uprobe_helpers.h"
 
-#define PERF_BUFFER_PAGES 16
-#define PERF_POLL_TIMEOUT_MS 100
+#define PERF_BUFFER_PAGES	16
+#define PERF_POLL_TIMEOUT_MS	100
 #define warn(...) fprintf(stderr, __VA_ARGS__)
 
 static volatile sig_atomic_t exiting = 0;
-static pid_t traced_pid = 0;
+
+static pid_t target_pid = 0;
+static const char *libc_path = NULL;
 
 const char *argp_program_version = "gethostlatency 0.1";
 const char *argp_program_bug_address =
@@ -28,7 +35,7 @@ const char *argp_program_bug_address =
 const char argp_program_doc[] =
 "Show latency for getaddrinfo/gethostbyname[2] calls.\n"
 "\n"
-"USAGE: gethostlatency [-h] [-p PID]\n"
+"USAGE: gethostlatency [-h] [-p PID] [-l LIBC]\n"
 "\n"
 "EXAMPLES:\n"
 "    gethostlatency             # time getaddrinfo/gethostbyname[2] calls\n"
@@ -36,6 +43,7 @@ const char argp_program_doc[] =
 
 static const struct argp_option opts[] = {
 	{ "pid", 'p', "PID", 0, "Process ID to trace" },
+	{ "libc", 'l', "LIBC", 0, "Specify which libc.so to use" },
 	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
 	{},
 };
@@ -52,7 +60,14 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 			warn("Invalid PID: %s\n", arg);
 			argp_usage(state);
 		}
-		traced_pid = pid;
+		target_pid = pid;
+		break;
+	case 'l':
+		libc_path = strdup(arg);
+		if (access(libc_path, F_OK)) {
+			warn("Invalid libc: %s\n", arg);
+			argp_usage(state);
+		}
 		break;
 	case 'h':
 		argp_state_help(state, stderr, ARGP_HELP_STD_HELP);
@@ -68,33 +83,18 @@ static void sig_int(int signo)
 	exiting = 1;
 }
 
-static const char *strftime_now(char *s, size_t max, const char *format)
-{
-	struct tm *tm;
-	time_t t;
-
-	t = time(NULL);
-	tm = localtime(&t);
-	if (tm == NULL) {
-		warn("localtime: %s\n", strerror(errno));
-		return "<failed>";
-	}
-	if (strftime(s, max, format, tm) == 0) {
-		warn("strftime error\n");
-		return "<failed>";
-	}
-	return s;
-}
-
 static void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
 {
-	const struct val_t *e = data;
-	char s[16] = {};
-	const char *now;
+	const struct event *e = data;
+	struct tm *tm;
+	char ts[16];
+	time_t t;
 
-	now = strftime_now(s, sizeof(s), "%H:%M:%S");
-	printf("%-11s %-10d %-20s %-10.2f %-16s\n",
-		now, e->pid, e->comm, (double)e->time/1000000, e->host);
+	time(&t);
+	tm = localtime(&t);
+	strftime(ts, sizeof(ts), "%H:%M:%S", tm);
+	printf("%-8s %-7d %-16s %-10.3f %-s\n",
+	       ts, e->pid, e->comm, (double)e->time/1000000, e->host);
 }
 
 static void handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
@@ -105,19 +105,22 @@ static void handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
 static int get_libc_path(char *path)
 {
 	FILE *f;
-	char buf[256] = {};
+	char buf[PATH_MAX] = {};
 	char *filename;
 	float version;
 
-	f = fopen("/proc/self/maps", "r");
-	if (!f) {
-		return -errno;
+	if (libc_path) {
+		memcpy(path, libc_path, strlen(libc_path));
+		return 0;
 	}
 
+	f = fopen("/proc/self/maps", "r");
+	if (!f)
+		return -errno;
+
 	while (fscanf(f, "%*x-%*x %*s %*s %*s %*s %[^\n]\n", buf) != EOF) {
-		if (strchr(buf, '/') != buf) {
+		if (strchr(buf, '/') != buf)
 			continue;
-		}
 		filename = strrchr(buf, '/') + 1;
 		if (sscanf(filename, "libc-%f.so", &version) == 1) {
 			memcpy(path, buf, strlen(buf));
@@ -130,7 +133,7 @@ static int get_libc_path(char *path)
 	return -1;
 }
 
-static int attach_uprobes(struct gethostlatency_bpf *obj)
+static int attach_uprobes(struct gethostlatency_bpf *obj, struct bpf_link *links[])
 {
 	int err;
 	char libc_path[PATH_MAX] = {};
@@ -147,18 +150,16 @@ static int attach_uprobes(struct gethostlatency_bpf *obj)
 		warn("could not find getaddrinfo in %s\n", libc_path);
 		return -1;
 	}
-	obj->links.handle_entry =
-		bpf_program__attach_uprobe(obj->progs.handle_entry, false,
-					   traced_pid ?: -1, libc_path, func_off);
-	err = libbpf_get_error(obj->links.handle_entry);
+	links[0] = bpf_program__attach_uprobe(obj->progs.handle_entry, false,
+					      target_pid ?: -1, libc_path, func_off);
+	err = libbpf_get_error(links[0]);
 	if (err) {
 		warn("failed to attach getaddrinfo: %d\n", err);
 		return -1;
 	}
-	obj->links.handle_return =
-		bpf_program__attach_uprobe(obj->progs.handle_return, true,
-					   traced_pid ?: -1, libc_path, func_off);
-	err = libbpf_get_error(obj->links.handle_return);
+	links[1] = bpf_program__attach_uprobe(obj->progs.handle_return, true,
+					      target_pid ?: -1, libc_path, func_off);
+	err = libbpf_get_error(links[1]);
 	if (err) {
 		warn("failed to attach getaddrinfo: %d\n", err);
 		return -1;
@@ -166,21 +167,19 @@ static int attach_uprobes(struct gethostlatency_bpf *obj)
 
 	func_off = get_elf_func_offset(libc_path, "gethostbyname");
 	if (func_off < 0) {
-		warn("Could not find gethostbyname in %s\n", libc_path);
+		warn("could not find gethostbyname in %s\n", libc_path);
 		return -1;
 	}
-	obj->links.handle_entry =
-		bpf_program__attach_uprobe(obj->progs.handle_entry, false,
-					   traced_pid ?: -1, libc_path, func_off);
-	err = libbpf_get_error(obj->links.handle_entry);
+	links[2] = bpf_program__attach_uprobe(obj->progs.handle_entry, false,
+					      target_pid ?: -1, libc_path, func_off);
+	err = libbpf_get_error(links[2]);
 	if (err) {
 		warn("failed to attach gethostbyname: %d\n", err);
 		return -1;
 	}
-	obj->links.handle_return =
-		bpf_program__attach_uprobe(obj->progs.handle_return, true,
-					   traced_pid ?: -1, libc_path, func_off);
-	err = libbpf_get_error(obj->links.handle_return);
+	links[3] = bpf_program__attach_uprobe(obj->progs.handle_return, true,
+					      target_pid ?: -1, libc_path, func_off);
+	err = libbpf_get_error(links[3]);
 	if (err) {
 		warn("failed to attach gethostbyname: %d\n", err);
 		return -1;
@@ -188,21 +187,19 @@ static int attach_uprobes(struct gethostlatency_bpf *obj)
 
 	func_off = get_elf_func_offset(libc_path, "gethostbyname2");
 	if (func_off < 0) {
-		warn("Could not find gethostbyname2 in %s\n", libc_path);
+		warn("could not find gethostbyname2 in %s\n", libc_path);
 		return -1;
 	}
-	obj->links.handle_entry =
-		bpf_program__attach_uprobe(obj->progs.handle_entry, false,
-					   traced_pid ?: -1, libc_path, func_off);
-	err = libbpf_get_error(obj->links.handle_entry);
+	links[4] = bpf_program__attach_uprobe(obj->progs.handle_entry, false,
+					      target_pid ?: -1, libc_path, func_off);
+	err = libbpf_get_error(links[4]);
 	if (err) {
 		warn("failed to attach gethostbyname2: %d\n", err);
 		return -1;
 	}
-	obj->links.handle_return =
-		bpf_program__attach_uprobe(obj->progs.handle_return, true,
-					   traced_pid ?: -1, libc_path, func_off);
-	err = libbpf_get_error(obj->links.handle_return);
+	links[5] = bpf_program__attach_uprobe(obj->progs.handle_return, true,
+					      target_pid ?: -1, libc_path, func_off);
+	err = libbpf_get_error(links[5]);
 	if (err) {
 		warn("failed to attach gethostbyname2: %d\n", err);
 		return -1;
@@ -220,8 +217,9 @@ int main(int argc, char **argv)
 	};
 	struct perf_buffer_opts pb_opts;
 	struct perf_buffer *pb = NULL;
+	struct bpf_link *links[6] = {};
 	struct gethostlatency_bpf *obj;
-	int err;
+	int i, err;
 
 	err = argp_parse(&argp, argc, argv, 0, NULL, NULL);
 	if (err)
@@ -239,7 +237,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	obj->rodata->targ_tgid = traced_pid;
+	obj->rodata->target_pid = target_pid;
 
 	err = gethostlatency_bpf__load(obj);
 	if (err) {
@@ -247,10 +245,9 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
-	err = attach_uprobes(obj);
-	if (err) {
+	err = attach_uprobes(obj, links);
+	if (err)
 		goto cleanup;
-	}
 
 	pb_opts.sample_cb = handle_event;
 	pb_opts.lost_cb = handle_lost_events;
@@ -263,22 +260,28 @@ int main(int argc, char **argv)
 	}
 
 	if (signal(SIGINT, sig_int) == SIG_ERR) {
-		warn("can't set signal handler: %s\n", strerror(-errno));
+		warn("can't set signal handler: %s\n", strerror(errno));
+		err = 1;
 		goto cleanup;
 	}
 
-	printf("%-11s %-10s %-20s %-10s %-16s\n",
-		"TIME", "PID", "COMM", "LATms", "HOST");
+	printf("%-8s %-7s %-16s %-10s %-s\n",
+	       "TIME", "PID", "COMM", "LATms", "HOST");
 
-	while (1) {
-		if ((err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS)) < 0)
-			break;
-		if (exiting)
+	while (!exiting) {
+		err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS);
+		if (err < 0 && errno != EINTR) {
+			warn("error polling perf buffer: %s\n", strerror(errno));
 			goto cleanup;
+		}
+		/* reset err to return 0 if exiting */
+		err = 0;
 	}
-	warn("error polling perf buffer: %d\n", err);
 
 cleanup:
+	perf_buffer__free(pb);
+	for (i = 0; i < 6; i++)
+		bpf_link__destroy(links[i]);
 	gethostlatency_bpf__destroy(obj);
 
 	return err != 0;

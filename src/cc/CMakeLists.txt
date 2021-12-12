@@ -60,15 +60,6 @@ if(NOT CMAKE_USE_LIBBPF_PACKAGE)
   set(libbpf_uapi libbpf/include/uapi/linux/)
 endif()
 
-add_library(bpf-static STATIC libbpf.c perf_reader.c ${libbpf_sources})
-set_target_properties(bpf-static PROPERTIES OUTPUT_NAME bcc_bpf)
-add_library(bpf-shared SHARED libbpf.c perf_reader.c ${libbpf_sources})
-set_target_properties(bpf-shared PROPERTIES VERSION ${REVISION_LAST} SOVERSION 0)
-set_target_properties(bpf-shared PROPERTIES OUTPUT_NAME bcc_bpf)
-if(CMAKE_USE_LIBBPF_PACKAGE AND LIBBPF_FOUND)
-  target_link_libraries(bpf-shared ${LIBBPF_LIBRARIES})
-endif()
-
 set(bcc_common_sources bcc_common.cc bpf_module.cc bcc_btf.cc exported_files.cc)
 if (${LLVM_PACKAGE_VERSION} VERSION_EQUAL 6 OR ${LLVM_PACKAGE_VERSION} VERSION_GREATER 6)
   set(bcc_common_sources ${bcc_common_sources} bcc_debug.cc)
@@ -98,6 +89,7 @@ set_target_properties(bcc-shared PROPERTIES VERSION ${REVISION_LAST} SOVERSION 0
 set_target_properties(bcc-shared PROPERTIES OUTPUT_NAME bcc)
 
 if(ENABLE_USDT)
+  add_definitions(-DEXPORT_USDT)
   set(bcc_usdt_sources usdt/usdt.cc usdt/usdt_args.cc)
   # else undefined
 endif()
@@ -109,6 +101,21 @@ add_library(bcc-static STATIC
 set_target_properties(bcc-static PROPERTIES OUTPUT_NAME bcc)
 set(bcc-lua-static
   ${bcc_common_sources} ${bcc_table_sources} ${bcc_sym_sources} ${bcc_util_sources})
+
+set(bpf_sources libbpf.c perf_reader.c ${libbpf_sources} ${bcc_sym_sources} ${bcc_util_sources} ${bcc_usdt_sources})
+add_library(bpf-static STATIC ${bpf_sources})
+set_target_properties(bpf-static PROPERTIES OUTPUT_NAME bcc_bpf)
+target_link_libraries(bpf-static elf z)
+add_library(bpf-shared SHARED ${bpf_sources})
+set_target_properties(bpf-shared PROPERTIES VERSION ${REVISION_LAST} SOVERSION 0)
+set_target_properties(bpf-shared PROPERTIES OUTPUT_NAME bcc_bpf)
+target_link_libraries(bpf-shared elf z)
+if(LIBDEBUGINFOD_FOUND)
+  target_link_libraries(bpf-shared ${LIBDEBUGINFOD_LIBRARIES})
+endif(LIBDEBUGINFOD_FOUND)
+if(CMAKE_USE_LIBBPF_PACKAGE AND LIBBPF_FOUND)
+  target_link_libraries(bpf-shared ${LIBBPF_LIBRARIES})
+endif()
 
 include(clang_libs)
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${clang_lib_exclude_flags}")

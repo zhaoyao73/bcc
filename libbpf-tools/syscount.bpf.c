@@ -62,7 +62,6 @@ int sys_enter(struct trace_event_raw_sys_enter *args)
 SEC("tracepoint/raw_syscalls/sys_exit")
 int sys_exit(struct trace_event_raw_sys_exit *args)
 {
-	struct task_struct *current;
 	u64 id = bpf_get_current_pid_tgid();
 	static const struct data_t zero;
 	pid_t pid = id >> 32;
@@ -91,11 +90,11 @@ int sys_exit(struct trace_event_raw_sys_exit *args)
 	key = (count_by_process) ? pid : args->id;
 	val = bpf_map_lookup_or_try_init(&data, &key, &zero);
 	if (val) {
-		val->count++;
+		__sync_fetch_and_add(&val->count, 1);
 		if (count_by_process)
 			save_proc_name(val);
 		if (measure_latency)
-			val->total_ns += bpf_ktime_get_ns() - *start_ts;
+			__sync_fetch_and_add(&val->total_ns, bpf_ktime_get_ns() - *start_ts);
 	}
 	return 0;
 }

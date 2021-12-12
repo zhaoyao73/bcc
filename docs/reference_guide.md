@@ -99,6 +99,8 @@ This guide is incomplete. If something feels missing, check the bcc and kernel s
         - [9. attach_xdp()](#9-attach_xdp)
         - [10. attach_func()](#10-attach_func)
         - [11. detach_func()](#11-detach_func)
+        - [12. detach_kprobe()](#12-detach_kprobe)
+        - [13. detach_kretprobe()](#13-detach_kretprobe)
     - [Debug Output](#debug-output)
         - [1. trace_print()](#1-trace_print)
         - [2. trace_fields()](#2-trace_fields)
@@ -154,7 +156,7 @@ Arguments are specified on the function declaration: kprobe__*kernel_function_na
 For example:
 
 ```C
-int kprobe__tcp_v4_connect(struct pt_regs *ctx, struct sock *sk)
+int kprobe__tcp_v4_connect(struct pt_regs *ctx, struct sock *sk) {
     [...]
 }
 ```
@@ -1605,6 +1607,7 @@ b.attach_kprobe(event="sys_clone", fn_name="do_trace")
 This will instrument the kernel ```sys_clone()``` function, which will then run our BPF defined ```do_trace()``` function each time it is called.
 
 You can call attach_kprobe() more than once, and attach your BPF function to multiple kernel functions.
+You can also call attach_kprobe() more than once to attach multiple BPF functions to the same kernel function.
 
 See the previous kprobes section for how to instrument arguments from BPF.
 
@@ -1627,6 +1630,7 @@ b.attach_kretprobe(event="vfs_read", fn_name="do_return")
 This will instrument the kernel ```vfs_read()``` function, which will then run our BPF defined ```do_return()``` function each time it is called.
 
 You can call attach_kretprobe() more than once, and attach your BPF function to multiple kernel function returns.
+You can also call attach_kretprobe() more than once to attach multiple BPF functions to the same kernel function return.
 
 When a kretprobe is installed on a kernel function, there is a limit on how many parallel calls it can catch. You can change that limit with ```maxactive```. See the kprobes documentation for its default value.
 
@@ -1804,7 +1808,7 @@ BPF.attach_raw_socket(bpf_func, ifname)
 Examples in situ:
 [search /examples](https://github.com/iovisor/bcc/search?q=attach_raw_socket+path%3Aexamples+language%3Apython&type=Code)
 ### 9. attach_xdp()
-Syntax: ```BPF.attach_xdp(dev="device", fn=b.load_func("fn_name",BPF_XDP), flags)```
+Syntax: ```BPF.attach_xdp(dev="device", fn=b.load_func("fn_name",BPF.XDP), flags)```
 
 Instruments the network driver described by ```dev``` , and then receives the packet, run the BPF function ```fn_name()``` with flags.
 
@@ -1819,7 +1823,7 @@ XDP_FLAGS_HW_MODE = (1 << 3)
 XDP_FLAGS_REPLACE = (1 << 4)
 ```
 
-You can use flags like this ```BPF.attach_xdp(dev="device", fn=b.load_func("fn_name",BPF_XDP), flags=BPF.XDP_FLAGS_UPDATE_IF_NOEXIST)```
+You can use flags like this ```BPF.attach_xdp(dev="device", fn=b.load_func("fn_name",BPF.XDP), flags=BPF.XDP_FLAGS_UPDATE_IF_NOEXIST)```
 
 The default value of flgas is 0. This means if there is no xdp program with `device`, the fn will run with that device. If there is an xdp program running with device, the old program will be replaced with new fn program.
 
@@ -1888,6 +1892,30 @@ b.detach_func(fn, map_fd, BPFAttachType.SK_MSG_VERDICT)
 Examples in situ:
 
 [search /examples](https://github.com/iovisor/bcc/search?q=detach_func+path%3Aexamples+language%3Apython&type=Code),
+
+### 12. detach_kprobe()
+
+Syntax: ```BPF.detach_kprobe(event="event", fn_name="name")```
+
+Detach a kprobe handler function of the specified event.
+
+For example:
+
+```Python
+b.detach_kprobe(event="__page_cache_alloc", fn_name="trace_func_entry")
+```
+
+### 13. detach_kretprobe()
+
+Syntax: ```BPF.detach_kretprobe(event="event", fn_name="name")```
+
+Detach a kretprobe handler function of the specified event.
+
+For example:
+
+```Python
+b.detach_kretprobe(event="__page_cache_alloc", fn_name="trace_func_return")
+```
 
 ## Debug Output
 

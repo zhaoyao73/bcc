@@ -4,12 +4,14 @@
 // Based on biosnoop(8) from BCC by Brendan Gregg.
 // 29-Jun-2020   Wenbo Zhang   Created this.
 #include <argp.h>
+#include <signal.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <time.h>
 #include <bpf/libbpf.h>
 #include <sys/resource.h>
 #include <bpf/bpf.h>
+#include <fcntl.h>
 #include "blk_types.h"
 #include "biosnoop.h"
 #include "biosnoop.skel.h"
@@ -18,12 +20,16 @@
 #define PERF_BUFFER_PAGES	16
 #define PERF_POLL_TIMEOUT_MS	100
 
+static volatile sig_atomic_t exiting = 0;
+
 static struct env {
 	char *disk;
 	int duration;
 	bool timestamp;
 	bool queued;
 	bool verbose;
+	char *cgroupspath;
+	bool cg;
 } env = {};
 
 static volatile __u64 start_ts;
@@ -34,18 +40,20 @@ const char *argp_program_bug_address =
 const char argp_program_doc[] =
 "Trace block I/O.\n"
 "\n"
-"USAGE: biosnoop [--help] [-d DISK] [-Q]\n"
+"USAGE: biosnoop [--help] [-d DISK] [-c CG] [-Q]\n"
 "\n"
 "EXAMPLES:\n"
 "    biosnoop              # trace all block I/O\n"
 "    biosnoop -Q           # include OS queued time in I/O time\n"
 "    biosnoop 10           # trace for 10 seconds only\n"
-"    biosnoop -d sdc       # trace sdc only\n";
+"    biosnoop -d sdc       # trace sdc only\n"
+"    biosnoop -c CG        # Trace process under cgroupsPath CG\n";
 
 static const struct argp_option opts[] = {
 	{ "queued", 'Q', NULL, 0, "Include OS queued time in I/O time" },
 	{ "disk",  'd', "DISK",  0, "Trace this disk only" },
 	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
+	{ "cgroup", 'c', "/sys/fs/cgroup/unified/CG", 0, "Trace process in cgroup path"},
 	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
 	{},
 };
@@ -63,6 +71,10 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 		break;
 	case 'Q':
 		env.queued = true;
+		break;
+	case 'c':
+		env.cg = true;
+		env.cgroupspath = arg;
 		break;
 	case 'd':
 		env.disk = arg;
@@ -96,6 +108,11 @@ int libbpf_print_fn(enum libbpf_print_level level,
 	if (level == LIBBPF_DEBUG && !env.verbose)
 		return 0;
 	return vfprintf(stderr, format, args);
+}
+
+static void sig_int(int signo)
+{
+	exiting = 1;
 }
 
 static void blk_fill_rwbs(char *rwbs, unsigned int op)
@@ -180,6 +197,8 @@ int main(int argc, char **argv)
 	struct biosnoop_bpf *obj;
 	__u64 time_end = 0;
 	int err;
+	int idx, cg_map_fd;
+	int cgfd = -1;
 
 	err = argp_parse(&argp, argc, argv, 0, NULL, NULL);
 	if (err)
@@ -214,11 +233,27 @@ int main(int argc, char **argv)
 		}
 	}
 	obj->rodata->targ_queued = env.queued;
+	obj->rodata->filter_cg = env.cg;
 
 	err = biosnoop_bpf__load(obj);
 	if (err) {
 		fprintf(stderr, "failed to load BPF object: %d\n", err);
 		goto cleanup;
+	}
+
+	/* update cgroup path fd to map */
+	if (env.cg) {
+		idx = 0;
+		cg_map_fd = bpf_map__fd(obj->maps.cgroup_map);
+		cgfd = open(env.cgroupspath, O_RDONLY);
+		if (cgfd < 0) {
+			fprintf(stderr, "Failed opening Cgroup path: %s\n", env.cgroupspath);
+			goto cleanup;
+		}
+		if (bpf_map_update_elem(cg_map_fd, &idx, &cgfd, BPF_ANY)) {
+			fprintf(stderr, "Failed adding target cgroup to map\n");
+			goto cleanup;
+		}
 	}
 
 	obj->links.blk_account_io_start =
@@ -293,19 +328,32 @@ int main(int argc, char **argv)
 	if (env.duration)
 		time_end = get_ktime_ns() + env.duration * NSEC_PER_SEC;
 
+	if (signal(SIGINT, sig_int) == SIG_ERR) {
+		fprintf(stderr, "can't set signal handler: %s\n", strerror(errno));
+		err = 1;
+		goto cleanup;
+	}
+
 	/* main: poll */
-	while (1) {
-		if ((err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS)) < 0)
-			break;
+	while (!exiting) {
+		err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS);
+		if (err < 0 && errno != EINTR) {
+			fprintf(stderr, "error polling perf buffer: %s\n", strerror(errno));
+			goto cleanup;
+		}
 		if (env.duration && get_ktime_ns() > time_end)
 			goto cleanup;
+		/* reset err to return 0 if exiting */
+		err = 0;
 	}
-	printf("error polling perf buffer: %d\n", err);
 
 cleanup:
+	perf_buffer__free(pb);
 	biosnoop_bpf__destroy(obj);
 	ksyms__free(ksyms);
 	partitions__free(partitions);
+	if (cgfd > 0)
+		close(cgfd);
 
 	return err != 0;
 }

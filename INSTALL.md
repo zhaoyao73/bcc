@@ -9,16 +9,18 @@
   - [Gentoo](#gentoo---portage)
   - [openSUSE](#opensuse---binary)
   - [RHEL](#rhel---binary)
-  - [Amazon Linux 1](#Amazon-Linux-1---Binary)
-  - [Amazon Linux 2](#Amazon-Linux-2---Binary)
+  - [Amazon Linux 1](#amazon-linux-1---binary)
+  - [Amazon Linux 2](#amazon-linux-2---binary)
   - [Alpine](#alpine---binary)
 * [Source](#source)
+  - [libbpf Submodule](#libbpf-submodule)
   - [Debian](#debian---source)
   - [Ubuntu](#ubuntu---source)
   - [Fedora](#fedora---source)
   - [openSUSE](#opensuse---source)
   - [Centos](#centos---source)
-  - [Amazon Linux](#amazon-linux---source)
+  - [Amazon Linux 1](#amazon-linux-1---source)
+  - [Amazon Linux 2](#amazon-linux-2---source)
   - [Alpine](#alpine---source)
   - [Arch](#arch---source)
 * [Older Instructions](#older-instructions)
@@ -233,11 +235,9 @@ sudo yum install bcc
 
 ## Amazon Linux 2 - Binary
 Use case 1. Install BCC for your AMI's default kernel (no reboot required):
-   Tested on Amazon Linux AMI release 2020.03 (kernel 4.14.154-128.181.amzn2.x86_64)
+   Tested on Amazon Linux AMI release 2021.11 (kernel 5.10.75-79.358.amzn2.x86_64)
 ```
-sudo amazon-linux-extras enable BCC
-sudo yum install kernel-devel-$(uname -r)
-sudo yum install bcc
+sudo amazon-linux-extras install BCC
 ```
 
 ## Alpine - Binary
@@ -335,15 +335,18 @@ sudo apt-get update
 
 # For Bionic (18.04 LTS)
 sudo apt-get -y install bison build-essential cmake flex git libedit-dev \
-  libllvm6.0 llvm-6.0-dev libclang-6.0-dev python zlib1g-dev libelf-dev libfl-dev
+  libllvm6.0 llvm-6.0-dev libclang-6.0-dev python zlib1g-dev libelf-dev libfl-dev python3-distutils
 
 # For Eoan (19.10) or Focal (20.04.1 LTS)
 sudo apt install -y bison build-essential cmake flex git libedit-dev \
-  libllvm7 llvm-7-dev libclang-7-dev python zlib1g-dev libelf-dev libfl-dev
+  libllvm7 llvm-7-dev libclang-7-dev python zlib1g-dev libelf-dev libfl-dev python3-distutils
+  
+# For Hirsute (21.04)  or Impish (21.10)
+sudo apt install -y bison build-essential cmake flex git libedit-dev   libllvm11 llvm-11-dev libclang-11-dev python zlib1g-dev libelf-dev libfl-dev python3-distutils
 
 # For other versions
 sudo apt-get -y install bison build-essential cmake flex git libedit-dev \
-  libllvm3.7 llvm-3.7-dev libclang-3.7-dev python zlib1g-dev libelf-dev
+  libllvm3.7 llvm-3.7-dev libclang-3.7-dev python zlib1g-dev libelf-dev python3-distutils
 
 # For Lua support
 sudo apt-get -y install luajit luajit-5.1-dev

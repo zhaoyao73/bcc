@@ -28,7 +28,7 @@ import traceback
 debug = False
 
 def verify_limit(num):
-    probe_limit = 1000
+    probe_limit = BPF.get_probe_limit()
     if num > probe_limit:
         raise Exception("maximum of %d probes allowed, attempted %d" %
                         (probe_limit, num))
@@ -168,11 +168,7 @@ int PROBE_FUNCTION(void *ctx) {
     FILTERPID
     FILTERCPU
     int loc = LOCATION;
-    u64 *val = counts.lookup(&loc);
-    if (!val) {
-        return 0;   // Should never happen, # of locations is known
-    }
-    (*val)++;
+    counts.atomic_increment(loc);
     return 0;
 }
         """

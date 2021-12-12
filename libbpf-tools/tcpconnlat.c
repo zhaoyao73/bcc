@@ -5,6 +5,7 @@
 // 11-Jul-2020   Wenbo Zhang   Created this.
 #include <argp.h>
 #include <arpa/inet.h>
+#include <signal.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <time.h>
@@ -17,10 +18,13 @@
 #define PERF_BUFFER_PAGES	16
 #define PERF_POLL_TIMEOUT_MS	100
 
+static volatile sig_atomic_t exiting = 0;
+
 static struct env {
 	__u64 min_us;
 	pid_t pid;
 	bool timestamp;
+	bool lport;
 	bool verbose;
 } env;
 
@@ -30,18 +34,20 @@ const char *argp_program_bug_address =
 const char argp_program_doc[] =
 "\nTrace TCP connects and show connection latency.\n"
 "\n"
-"USAGE: tcpconnlat [--help] [-t] [-p PID]\n"
+"USAGE: tcpconnlat [--help] [-t] [-p PID] [-L]\n"
 "\n"
 "EXAMPLES:\n"
-"    tcpconnlat              # summarize on-CPU time as a histogram"
-"    tcpconnlat 1            # trace connection latency slower than 1 ms"
-"    tcpconnlat 0.1          # trace connection latency slower than 100 us"
-"    tcpconnlat -t           # 1s summaries, milliseconds, and timestamps"
-"    tcpconnlat -p 185       # trace PID 185 only";
+"    tcpconnlat              # summarize on-CPU time as a histogram\n"
+"    tcpconnlat 1            # trace connection latency slower than 1 ms\n"
+"    tcpconnlat 0.1          # trace connection latency slower than 100 us\n"
+"    tcpconnlat -t           # 1s summaries, milliseconds, and timestamps\n"
+"    tcpconnlat -p 185       # trace PID 185 only\n"
+"    tcpconnlat -L           # include LPORT while printing outputs\n";
 
 static const struct argp_option opts[] = {
 	{ "timestamp", 't', NULL, 0, "Include timestamp on output" },
 	{ "pid", 'p', "PID", 0, "Trace this PID only" },
+	{ "lport", 'L', NULL, 0, "Include LPORT on output" },
 	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
 	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
 	{},
@@ -69,6 +75,9 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 	case 't':
 		env.timestamp = true;
 		break;
+	case 'L':
+		env.lport = true;
+		break;
 	case ARGP_KEY_ARG:
 		if (pos_args++) {
 			fprintf(stderr,
@@ -94,6 +103,11 @@ int libbpf_print_fn(enum libbpf_print_level level,
 	if (level == LIBBPF_DEBUG && !env.verbose)
 		return 0;
 	return vfprintf(stderr, format, args);
+}
+
+static void sig_int(int signo)
+{
+	exiting = 1;
 }
 
 void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
@@ -123,10 +137,17 @@ void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
 		return;
 	}
 
-	printf("%-6d %-12.12s %-2d %-16s %-16s %-5d %.2f\n", e->tgid, e->comm,
-		e->af == AF_INET ? 4 : 6, inet_ntop(e->af, &s, src, sizeof(src)),
-		inet_ntop(e->af, &d, dst, sizeof(dst)), ntohs(e->dport),
-		e->delta_us / 1000.0);
+	if (env.lport) {
+		printf("%-6d %-12.12s %-2d %-16s %-6d %-16s %-5d %.2f\n", e->tgid, e->comm,
+			e->af == AF_INET ? 4 : 6, inet_ntop(e->af, &s, src, sizeof(src)), e->lport,
+			inet_ntop(e->af, &d, dst, sizeof(dst)), ntohs(e->dport),
+			e->delta_us / 1000.0);
+	} else {
+		printf("%-6d %-12.12s %-2d %-16s %-16s %-5d %.2f\n", e->tgid, e->comm,
+			e->af == AF_INET ? 4 : 6, inet_ntop(e->af, &s, src, sizeof(src)),
+			inet_ntop(e->af, &d, dst, sizeof(dst)), ntohs(e->dport),
+			e->delta_us / 1000.0);
+	}
 }
 
 void handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
@@ -191,19 +212,37 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
+	/* print header */
 	if (env.timestamp)
 		printf("%-9s ", ("TIME(s)"));
-	printf("%-6s %-12s %-2s %-16s %-16s %-5s %s\n",
-		"PID", "COMM", "IP", "SADDR", "DADDR", "DPORT", "LAT(ms)");
+	if (env.lport) {
+		printf("%-6s %-12s %-2s %-16s %-6s %-16s %-5s %s\n",
+			"PID", "COMM", "IP", "SADDR", "LPORT", "DADDR", "DPORT", "LAT(ms)");
+	} else {
+		printf("%-6s %-12s %-2s %-16s %-16s %-5s %s\n",
+			"PID", "COMM", "IP", "SADDR", "DADDR", "DPORT", "LAT(ms)");
+	}
+
+
+	if (signal(SIGINT, sig_int) == SIG_ERR) {
+		fprintf(stderr, "can't set signal handler: %s\n", strerror(errno));
+		err = 1;
+		goto cleanup;
+	}
 
 	/* main: poll */
-	while (1) {
-		if ((err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS)) < 0)
-			break;
+	while (!exiting) {
+		err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS);
+		if (err < 0 && errno != EINTR) {
+			fprintf(stderr, "error polling perf buffer: %s\n", strerror(errno));
+			goto cleanup;
+		}
+		/* reset err to return 0 if exiting */
+		err = 0;
 	}
-	printf("error polling perf buffer: %d\n", err);
 
 cleanup:
+	perf_buffer__free(pb);
 	tcpconnlat_bpf__destroy(obj);
 
 	return err != 0;

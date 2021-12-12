@@ -69,6 +69,12 @@ R"********(
  */
 #define BCC_SEC(NAME) __attribute__((section(NAME), used))
 
+#ifdef B_WORKAROUND
+#define BCC_SEC_HELPERS BCC_SEC("helpers")
+#else
+#define BCC_SEC_HELPERS
+#endif
+
 // Associate map with its key/value types
 #define BPF_ANNOTATE_KV_PAIR(name, type_key, type_val)	\
         struct ____btf_map_##name {			\
@@ -882,6 +888,39 @@ static long (*bpf_snprintf)(char *str, __u32 str_size, const char *fmt,
                             __u64 *data, __u32 data_len) =
   (void *)BPF_FUNC_snprintf;
 
+static long (*bpf_sys_bpf)(__u32 cmd, void *attr, __u32 attr_size) =
+  (void *)BPF_FUNC_sys_bpf;
+static long (*bpf_btf_find_by_name_kind)(char *name, int name_sz, __u32 kind, int flags) =
+  (void *)BPF_FUNC_btf_find_by_name_kind;
+static long (*bpf_sys_close)(__u32 fd) = (void *)BPF_FUNC_sys_close;
+
+struct bpf_timer;
+static long (*bpf_timer_init)(struct bpf_timer *timer, void *map, __u64 flags) =
+  (void *)BPF_FUNC_timer_init;
+static long (*bpf_timer_set_callback)(struct bpf_timer *timer, void *callback_fn) =
+  (void *)BPF_FUNC_timer_set_callback;
+static long (*bpf_timer_start)(struct bpf_timer *timer, __u64 nsecs, __u64 flags) =
+  (void *)BPF_FUNC_timer_start;
+static long (*bpf_timer_cancel)(struct bpf_timer *timer) = (void *)BPF_FUNC_timer_cancel;
+
+static __u64 (*bpf_get_func_ip)(void *ctx) = (void *)BPF_FUNC_get_func_ip;
+static __u64 (*bpf_get_attach_cookie)(void *ctx) = (void *)BPF_FUNC_get_attach_cookie;
+static long (*bpf_task_pt_regs)(struct task_struct *task) = (void *)BPF_FUNC_task_pt_regs;
+
+static long (*bpf_get_branch_snapshot)(void *entries, __u32 size, __u64 flags) =
+  (void *)BPF_FUNC_get_branch_snapshot;
+static long (*bpf_trace_vprintk)(const char *fmt, __u32 fmt_size, const void *data,
+                                 __u32 data_len) =
+  (void *)BPF_FUNC_trace_vprintk;
+static struct unix_sock *(*bpf_skc_to_unix_sock)(void *sk) =
+  (void *)BPF_FUNC_skc_to_unix_sock;
+static long (*bpf_kallsyms_lookup_name)(const char *name, int name_sz, int flags,
+				__u64 *res) =
+  (void *)BPF_FUNC_kallsyms_lookup_name;
+static long (*bpf_find_vma)(struct task_struct *task, __u64 addr, void *callback_fn,
+			    void *callback_ctx, __u64 flags) =
+  (void *)BPF_FUNC_find_vma;
+
 /* llvm builtin functions that eBPF C program may use to
  * emit BPF_LD_ABS and BPF_LD_IND instructions
  */
@@ -1001,7 +1040,7 @@ unsigned int bpf_log2l(unsigned long v)
 struct bpf_context;
 
 static inline __attribute__((always_inline))
-BCC_SEC("helpers")
+BCC_SEC_HELPERS
 u64 bpf_dext_pkt(void *pkt, u64 off, u64 bofs, u64 bsz) {
   if (bofs == 0 && bsz == 8) {
     return load_byte(pkt, off);
@@ -1024,7 +1063,7 @@ u64 bpf_dext_pkt(void *pkt, u64 off, u64 bofs, u64 bsz) {
 }
 
 static inline __attribute__((always_inline))
-BCC_SEC("helpers")
+BCC_SEC_HELPERS
 void bpf_dins_pkt(void *pkt, u64 off, u64 bofs, u64 bsz, u64 val) {
   // The load_xxx function does a bswap before returning the short/word/dword,
   // so the value in register will always be host endian. However, the bytes
@@ -1067,25 +1106,25 @@ void bpf_dins_pkt(void *pkt, u64 off, u64 bofs, u64 bsz, u64 val) {
 }
 
 static inline __attribute__((always_inline))
-BCC_SEC("helpers")
+BCC_SEC_HELPERS
 void * bpf_map_lookup_elem_(uintptr_t map, void *key) {
   return bpf_map_lookup_elem((void *)map, key);
 }
 
 static inline __attribute__((always_inline))
-BCC_SEC("helpers")
+BCC_SEC_HELPERS
 int bpf_map_update_elem_(uintptr_t map, void *key, void *value, u64 flags) {
   return bpf_map_update_elem((void *)map, key, value, flags);
 }
 
 static inline __attribute__((always_inline))
-BCC_SEC("helpers")
+BCC_SEC_HELPERS
 int bpf_map_delete_elem_(uintptr_t map, void *key) {
   return bpf_map_delete_elem((void *)map, key);
 }
 
 static inline __attribute__((always_inline))
-BCC_SEC("helpers")
+BCC_SEC_HELPERS
 int bpf_l3_csum_replace_(void *ctx, u64 off, u64 from, u64 to, u64 flags) {
   switch (flags & 0xf) {
     case 2:
@@ -1101,7 +1140,7 @@ int bpf_l3_csum_replace_(void *ctx, u64 off, u64 from, u64 to, u64 flags) {
 }
 
 static inline __attribute__((always_inline))
-BCC_SEC("helpers")
+BCC_SEC_HELPERS
 int bpf_l4_csum_replace_(void *ctx, u64 off, u64 from, u64 to, u64 flags) {
   switch (flags & 0xf) {
     case 2:
@@ -1290,16 +1329,16 @@ int name(unsigned long long *ctx)                               \
 static int ____##name(unsigned long long *ctx, ##args)
 
 #define KFUNC_PROBE(event, args...) \
-        BPF_PROG(kfunc__ ## event, args)
+        BPF_PROG(kfunc__ ## event, ##args)
 
 #define KRETFUNC_PROBE(event, args...) \
-        BPF_PROG(kretfunc__ ## event, args)
+        BPF_PROG(kretfunc__ ## event, ##args)
 
 #define KMOD_RET(event, args...) \
-        BPF_PROG(kmod_ret__ ## event, args)
+        BPF_PROG(kmod_ret__ ## event, ##args)
 
 #define LSM_PROBE(event, args...) \
-        BPF_PROG(lsm__ ## event, args)
+        BPF_PROG(lsm__ ## event, ##args)
 
 #define BPF_ITER(target) \
         int bpf_iter__ ## target (struct bpf_iter__ ## target *ctx)
@@ -1308,14 +1347,20 @@ static int ____##name(unsigned long long *ctx, ##args)
         do {                                                              \
             unsigned short __offset = args->data_loc_##field & 0xFFFF;    \
             bpf_probe_read((void *)dst, length, (char *)args + __offset); \
-        } while (0);
+        } while (0)
 
 #define TP_DATA_LOC_READ(dst, field)                                        \
         do {                                                                \
             unsigned short __offset = args->data_loc_##field & 0xFFFF;      \
             unsigned short __length = args->data_loc_##field >> 16;         \
             bpf_probe_read((void *)dst, __length, (char *)args + __offset); \
-        } while (0);
+        } while (0)
+
+#define TP_DATA_LOC_READ_STR(dst, field, length)                                \
+        do {                                                                    \
+            unsigned short __offset = args->data_loc_##field & 0xFFFF;          \
+            bpf_probe_read_str((void *)dst, length, (char *)args + __offset);   \
+        } while (0)
 
 #endif
 )********"
